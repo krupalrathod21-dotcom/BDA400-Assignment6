@@ -1,3 +1,4 @@
+
 ############################################################
 # BDA400 - Data Science Tools and Techniques
 # Assignment 6: Technical Analysis using R
@@ -5,60 +6,41 @@
 #
 # Student Name: Krupal Shaileshkumar Rathod
 # Project: Interactive Stock Portfolio Dashboard
-#
 # File: Rathod_Krupal_CA_BDA400_A06.R
 ############################################################
 
-
-# ==========================================================
-# SECTION 1: LOAD REQUIRED LIBRARIES
-# ==========================================================
+# SECTION 1: LOAD REQUIRED PACKAGES
 
 required_packages <- c(
-  "shiny", "ggplot2", "quantmod", "dplyr", "tidyr",
+  "shiny", "ggplot2", "quantmod", "dplyr",
   "lubridate", "TTR", "plotly", "DT", "zoo"
 )
 
 missing_packages <- required_packages[
-  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+  !vapply(required_packages, requireNamespace,
+          logical(1), quietly = TRUE)
 ]
 
 if (length(missing_packages) > 0) {
   install.packages(missing_packages)
 }
 
-invisible(lapply(required_packages, library, character.only = TRUE))
+invisible(lapply(required_packages, library,
+                 character.only = TRUE))
 
-
-# ==========================================================
-# SECTION 2: PROJECT CONFIGURATION
-# ==========================================================
+# SECTION 2: CONFIGURATION
 
 default_stocks <- c("AAPL", "MSFT", "GOOGL", "AMZN", "NVDA")
-default_start_date <- Sys.Date() - 365
-default_end_date <- Sys.Date()
+start_date <- Sys.Date() - 1825
+end_date <- Sys.Date()
 
-cat("====================================\n")
-cat("BDA400 Assignment 6\n")
-cat("Technical Analysis Dashboard\n")
-cat("Student: Krupal Shaileshkumar Rathod\n")
-cat("====================================\n")
-cat("\nDefault stock symbols:\n")
-print(default_stocks)
+# SECTION 3: DOWNLOAD STOCK DATA
 
-
-# ==========================================================
-# SECTION 3: DOWNLOAD STOCK MARKET DATA
-# ==========================================================
-
-stock_symbols <- default_stocks
-start_date <- default_start_date
-end_date <- default_end_date
 stock_data <- list()
 
-for (symbol in stock_symbols) {
-  cat("\nDownloading:", symbol, "\n")
-
+for (symbol in default_stocks) {
+  cat("Downloading:", symbol, "\n")
+  
   tryCatch({
     downloaded_data <- quantmod::getSymbols(
       symbol,
@@ -67,251 +49,277 @@ for (symbol in stock_symbols) {
       to = end_date,
       auto.assign = FALSE
     )
-
+    
     if (NROW(downloaded_data) > 0) {
       stock_data[[symbol]] <- downloaded_data
-      cat("Successfully downloaded:", symbol, "\n")
+      cat("Downloaded:", symbol, "\n")
     }
   }, error = function(e) {
-    cat("Download failed for", symbol, ":\n")
-    cat(conditionMessage(e), "\n")
+    cat("Download failed for", symbol, ":",
+        conditionMessage(e), "\n")
   })
 }
 
 if (length(stock_data) == 0) {
-  stop("No stock data was downloaded. Check your internet connection and try again.")
+  stop("No stock data downloaded. Check your internet connection.")
 }
 
 stock_symbols <- names(stock_data)
-cat("\nStock data download completed!\n")
-print(stock_symbols)
 
+# SECTION 4: PREPARE DAILY OHLC DATA
 
-# ==========================================================
-# SECTION 4: CHECK DOWNLOADED DATA
-# ==========================================================
-
-cat("\nDownloaded stock data summary:\n")
-for (symbol in names(stock_data)) {
-  cat(symbol, ":", NROW(stock_data[[symbol]]), "records\n")
+prepare_daily_data <- function(stock_xts, symbol) {
+  
+  data <- data.frame(
+    Date = as.Date(zoo::index(stock_xts)),
+    Open = as.numeric(quantmod::Op(stock_xts)),
+    High = as.numeric(quantmod::Hi(stock_xts)),
+    Low = as.numeric(quantmod::Lo(stock_xts)),
+    Close = as.numeric(quantmod::Cl(stock_xts)),
+    Volume = as.numeric(quantmod::Vo(stock_xts))
+  )
+  
+  data$Symbol <- symbol
+  data
 }
 
+daily_data <- do.call(
+  rbind,
+  lapply(names(stock_data), function(symbol) {
+    prepare_daily_data(stock_data[[symbol]], symbol)
+  })
+)
 
-# ==========================================================
-# SECTION 5: CALCULATE TECHNICAL INDICATORS
-# ==========================================================
+rownames(daily_data) <- NULL
 
-indicator_data <- list()
+# SECTION 5: AGGREGATE DATA BY TIMEFRAME
 
-for (symbol in names(stock_data)) {
-  prices <- quantmod::Cl(stock_data[[symbol]])
+aggregate_stock_data <- function(data, timeframe) {
+  
+  if (timeframe == "Daily") {
+    return(data)
+  }
+  
+  data <- data %>%
+    dplyr::mutate(
+      Period = if (timeframe == "Weekly") {
+        lubridate::floor_date(Date, unit = "week",
+                              week_start = 1)
+      } else {
+        lubridate::floor_date(Date, unit = "month")
+      }
+    ) %>%
+    dplyr::group_by(Period, Symbol) %>%
+    dplyr::summarise(
+      Date = min(Date),
+      Open = dplyr::first(Open),
+      High = max(High, na.rm = TRUE),
+      Low = min(Low, na.rm = TRUE),
+      Close = dplyr::last(Close),
+      Volume = sum(Volume, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::select(Date, Open, High, Low, Close,
+                  Volume, Symbol) %>%
+    dplyr::arrange(Date)
+  
+  data
+}
 
-  ma20 <- TTR::SMA(prices, n = 20)
-  ma50 <- TTR::SMA(prices, n = 50)
-  rsi <- TTR::RSI(prices, n = 14)
+# SECTION 6: CALCULATE INDICATORS AND TRADING SIGNALS
 
+calculate_indicators <- function(data) {
+  
+  data <- data %>% dplyr::arrange(Date)
+  
+  data$MA20 <- as.numeric(TTR::SMA(data$Close, n = 20))
+  data$MA50 <- as.numeric(TTR::SMA(data$Close, n = 50))
+  data$RSI <- as.numeric(TTR::RSI(data$Close, n = 14))
+  
   macd_values <- TTR::MACD(
-    prices,
+    data$Close,
     nFast = 12,
     nSlow = 26,
     nSig = 9,
     maType = "EMA"
   )
-
-  indicator_data[[symbol]] <- merge(
-    prices, ma20, ma50, rsi, macd_values
-  )
-
-  colnames(indicator_data[[symbol]]) <- c(
-    "Close", "MA20", "MA50", "RSI", "MACD", "Signal"
-  )
-}
-
-cat("\nTechnical indicators calculated successfully!\n")
-print(names(indicator_data))
-
-
-# ==========================================================
-# SECTION 6: GENERATE BUY, SELL AND HOLD SIGNALS
-# ==========================================================
-
-signal_data <- list()
-
-for (symbol in names(indicator_data)) {
-  stock_xts <- indicator_data[[symbol]]
-
-  data <- data.frame(
-    Date = as.Date(zoo::index(stock_xts)),
-    zoo::coredata(stock_xts)
-  )
-
-  short_ma <- data$MA20
-  long_ma <- data$MA50
-
-  previous_short <- c(NA, head(short_ma, -1))
-  previous_long <- c(NA, head(long_ma, -1))
-
-  trading_signal <- rep("HOLD", nrow(data))
-
+  
+  data$MACD <- as.numeric(macd_values[, 1])
+  data$MACD_Signal <- as.numeric(macd_values[, 2])
+  
+  previous_short <- c(NA, head(data$MA20, -1))
+  previous_long <- c(NA, head(data$MA50, -1))
+  
   valid <- stats::complete.cases(
-    short_ma, long_ma, previous_short, previous_long
+    data$MA20, data$MA50,
+    previous_short, previous_long
   )
-
+  
+  data$Trading_Signal <- "HOLD"
+  
   buy_condition <- valid &
-    short_ma > long_ma &
+    data$MA20 > data$MA50 &
     previous_short <= previous_long
-
+  
   sell_condition <- valid &
-    short_ma < long_ma &
+    data$MA20 < data$MA50 &
     previous_short >= previous_long
-
-  trading_signal[buy_condition] <- "BUY"
-  trading_signal[sell_condition] <- "SELL"
-
-  data$Trading_Signal <- trading_signal
-  signal_data[[symbol]] <- data
-
-  cat("\nTrading signals generated for:", symbol, "\n")
-  print(table(data$Trading_Signal))
+  
+  data$Trading_Signal[buy_condition] <- "BUY"
+  data$Trading_Signal[sell_condition] <- "SELL"
+  
+  data
 }
 
-cat("\nAll trading signals generated successfully!\n")
-
-
-# ==========================================================
-# SECTION 7: PREPARE COMPLETE DASHBOARD DATA
-# ==========================================================
-
-dashboard_data <- do.call(
-  rbind,
-  lapply(names(signal_data), function(symbol) {
-    raw_data <- stock_data[[symbol]]
-    indicators <- signal_data[[symbol]]
-
-    price_data <- data.frame(
-      Date = as.Date(zoo::index(raw_data)),
-      Open = as.numeric(quantmod::Op(raw_data)),
-      High = as.numeric(quantmod::Hi(raw_data)),
-      Low = as.numeric(quantmod::Lo(raw_data)),
-      Close = as.numeric(quantmod::Cl(raw_data)),
-      Volume = as.numeric(quantmod::Vo(raw_data))
-    )
-
-    merged_data <- merge(
-      price_data,
-      indicators[, c(
-        "Date", "MA20", "MA50", "RSI",
-        "MACD", "Signal", "Trading_Signal"
-      )],
-      by = "Date",
-      all.x = TRUE
-    )
-
-    merged_data$Symbol <- symbol
-    merged_data
-  })
-)
-
-rownames(dashboard_data) <- NULL
-dashboard_data <- dashboard_data[
-  order(dashboard_data$Symbol, dashboard_data$Date),
-]
-
-cat("\nDashboard dimensions:\n")
-print(dim(dashboard_data))
-cat("\nDashboard columns:\n")
-print(colnames(dashboard_data))
-cat("\nFirst six records:\n")
-print(head(dashboard_data))
-
-
-# ==========================================================
-# SECTION 8: SHINY DASHBOARD USER INTERFACE
-# ==========================================================
+# SECTION 7: SHINY USER INTERFACE
 
 ui <- shiny::fluidPage(
-  shiny::titlePanel("Stock Technical Analysis Dashboard"),
-
+  
+  shiny::titlePanel(
+    "Interactive Stock Portfolio Technical Analysis Dashboard"
+  ),
+  
   shiny::sidebarLayout(
+    
     shiny::sidebarPanel(
+      
       shiny::selectInput(
         "stock",
         "Select Stock:",
         choices = stock_symbols,
         selected = stock_symbols[1]
       ),
-
+      
       shiny::selectInput(
         "chart_type",
         "Select Chart Type:",
-        choices = c("Line Chart", "Candlestick Chart", "Area Chart"),
+        choices = c(
+          "Line Chart",
+          "Candlestick Chart",
+          "Area Chart"
+        ),
         selected = "Line Chart"
       ),
-
-      shiny::checkboxInput(
-        "show_ma20", "Show 20-Day Moving Average", value = TRUE
+      
+      shiny::selectInput(
+        "timeframe",
+        "Select Timeframe:",
+        choices = c("Daily", "Weekly", "Monthly"),
+        selected = "Daily"
       ),
-
-      shiny::checkboxInput(
-        "show_ma50", "Show 50-Day Moving Average", value = TRUE
+      
+      shiny::dateRangeInput(
+        "date_range",
+        "Select Date Range:",
+        start = min(daily_data$Date),
+        end = max(daily_data$Date),
+        min = min(daily_data$Date),
+        max = max(daily_data$Date),
+        format = "yyyy-mm-dd"
       ),
-
+      
+      shiny::hr(),
+      
       shiny::checkboxInput(
-        "show_rsi", "Show RSI Indicator", value = TRUE
+        "show_ma20",
+        "Show 20-Period Moving Average",
+        value = TRUE
       ),
-
+      
       shiny::checkboxInput(
-        "show_macd", "Show MACD Indicator", value = TRUE
+        "show_ma50",
+        "Show 50-Period Moving Average",
+        value = TRUE
+      ),
+      
+      shiny::checkboxInput(
+        "show_rsi",
+        "Show RSI Indicator",
+        value = TRUE
+      ),
+      
+      shiny::checkboxInput(
+        "show_macd",
+        "Show MACD Indicator",
+        value = TRUE
       )
     ),
-
+    
     shiny::mainPanel(
+      
       shiny::h3("Stock Price Chart"),
-      plotly::plotlyOutput("price_chart", height = "450px"),
-
+      plotly::plotlyOutput("price_chart", height = "500px"),
+      
       shiny::h3("RSI Indicator"),
       shiny::conditionalPanel(
         condition = "input.show_rsi == true",
         plotly::plotlyOutput("rsi_chart", height = "300px")
       ),
-
+      
       shiny::h3("MACD Indicator"),
       shiny::conditionalPanel(
         condition = "input.show_macd == true",
         plotly::plotlyOutput("macd_chart", height = "300px")
       ),
-
+      
       shiny::h3("Trading Signals"),
       DT::DTOutput("signal_table")
     )
   )
 )
 
-
-# ==========================================================
-# SECTION 9: SHINY SERVER LOGIC
-# ==========================================================
+# SECTION 8: SHINY SERVER
 
 server <- function(input, output, session) {
-
+  
+  # Prepare selected stock and timeframe data
+  
+  timeframe_data <- shiny::reactive({
+    
+    shiny::req(input$stock, input$timeframe)
+    
+    data <- daily_data %>%
+      dplyr::filter(Symbol == input$stock)
+    
+    data <- aggregate_stock_data(data, input$timeframe)
+    
+    calculate_indicators(data)
+  })
+  
+  # Apply selected date range after calculating indicators
+  
   selected_data <- shiny::reactive({
-    req(input$stock)
-
-    dashboard_data %>%
-      dplyr::filter(Symbol == input$stock) %>%
+    
+    shiny::req(input$date_range)
+    
+    data <- timeframe_data()
+    
+    data %>%
+      dplyr::filter(
+        Date >= input$date_range[1],
+        Date <= input$date_range[2]
+      ) %>%
       dplyr::arrange(Date)
   })
-
+  
+  # PRICE CHART: LINE, AREA AND CANDLESTICK
+  
   output$price_chart <- plotly::renderPlotly({
+    
     data <- selected_data()
-
+    
     shiny::validate(
-      shiny::need(nrow(data) > 0, "No stock data available.")
+      shiny::need(nrow(data) > 0,
+                  "No data available for the selected date range.")
     )
-
+    
+    signals <- data %>%
+      dplyr::filter(Trading_Signal %in% c("BUY", "SELL"))
+    
     if (input$chart_type == "Candlestick Chart") {
+      
       p <- plotly::plot_ly(
-        data,
+        data = data,
         x = ~Date,
         type = "candlestick",
         open = ~Open,
@@ -320,7 +328,7 @@ server <- function(input, output, session) {
         close = ~Close,
         name = input$stock
       )
-
+      
       if (isTRUE(input$show_ma20)) {
         p <- p %>% plotly::add_lines(
           x = data$Date,
@@ -329,7 +337,7 @@ server <- function(input, output, session) {
           connectgaps = FALSE
         )
       }
-
+      
       if (isTRUE(input$show_ma50)) {
         p <- p %>% plotly::add_lines(
           x = data$Date,
@@ -338,71 +346,135 @@ server <- function(input, output, session) {
           connectgaps = FALSE
         )
       }
-
+      
+      if (nrow(signals) > 0) {
+        p <- p %>% plotly::add_markers(
+          data = signals,
+          x = ~Date,
+          y = ~Close,
+          color = ~Trading_Signal,
+          colors = c("BUY" = "green", "SELL" = "red"),
+          marker = list(size = 10),
+          text = ~paste(Trading_Signal, Date),
+          name = "Trading Signals"
+        )
+      }
+      
       p %>% plotly::layout(
         title = paste(input$stock, "Candlestick Chart"),
         xaxis = list(title = "Date"),
         yaxis = list(title = "Price (USD)")
       )
-
+      
     } else {
-      p <- ggplot2::ggplot(data, ggplot2::aes(x = Date, y = Close))
-
+      
+      p <- ggplot2::ggplot(
+        data,
+        ggplot2::aes(x = Date, y = Close)
+      )
+      
       if (input$chart_type == "Area Chart") {
-        p <- p + ggplot2::geom_area(
-          fill = "skyblue", alpha = 0.45
-        ) +
+        p <- p +
+          ggplot2::geom_area(
+            fill = "skyblue",
+            alpha = 0.4
+          ) +
           ggplot2::geom_line(
-            color = "blue", linewidth = 0.7
+            color = "blue",
+            linewidth = 0.7
           )
       } else {
-        p <- p + ggplot2::geom_line(
-          color = "blue", linewidth = 0.8
-        )
+        p <- p +
+          ggplot2::geom_line(
+            color = "blue",
+            linewidth = 0.8
+          )
       }
-
+      
       if (isTRUE(input$show_ma20)) {
-        p <- p + ggplot2::geom_line(
-          ggplot2::aes(y = MA20, color = "MA20"),
-          linewidth = 0.8, na.rm = TRUE
-        )
+        p <- p +
+          ggplot2::geom_line(
+            ggplot2::aes(y = MA20, color = "MA20"),
+            linewidth = 0.8,
+            na.rm = TRUE
+          )
       }
-
+      
       if (isTRUE(input$show_ma50)) {
-        p <- p + ggplot2::geom_line(
-          ggplot2::aes(y = MA50, color = "MA50"),
-          linewidth = 0.8, na.rm = TRUE
-        )
+        p <- p +
+          ggplot2::geom_line(
+            ggplot2::aes(y = MA50, color = "MA50"),
+            linewidth = 0.8,
+            na.rm = TRUE
+          )
       }
-
+      
+      if (nrow(signals) > 0) {
+        p <- p +
+          ggplot2::geom_point(
+            data = signals,
+            ggplot2::aes(
+              x = Date,
+              y = Close,
+              color = Trading_Signal,
+              shape = Trading_Signal
+            ),
+            size = 3
+          )
+      }
+      
       p <- p +
+        ggplot2::scale_color_manual(
+          values = c(
+            "MA20" = "orange",
+            "MA50" = "purple",
+            "BUY" = "green",
+            "SELL" = "red"
+          )
+        ) +
         ggplot2::labs(
           title = paste(input$stock, input$chart_type),
           x = "Date",
-          y = "Closing Price (USD)",
-          color = "Indicator"
+          y = "Price (USD)",
+          color = "Legend",
+          shape = "Trading Signal"
         ) +
         ggplot2::theme_minimal()
-
+      
       plotly::ggplotly(p)
     }
   })
-
+  
+  # RSI CHART
+  
   output$rsi_chart <- plotly::renderPlotly({
+    
     shiny::req(input$show_rsi)
-
+    
     data <- selected_data()
-
+    
+    shiny::validate(
+      shiny::need(nrow(data) > 0, "No RSI data available.")
+    )
+    
     p <- ggplot2::ggplot(
       data,
       ggplot2::aes(x = Date, y = RSI)
     ) +
-      ggplot2::geom_line(color = "purple", linewidth = 0.8, na.rm = TRUE) +
-      ggplot2::geom_hline(
-        yintercept = 70, linetype = "dashed"
+      ggplot2::geom_line(
+        color = "purple",
+        linewidth = 0.8,
+        na.rm = TRUE
       ) +
       ggplot2::geom_hline(
-        yintercept = 30, linetype = "dashed"
+        yintercept = 70,
+        linetype = "dashed",
+        color = "red"
+      ) +
+      ggplot2::geom_hline(
+        yintercept = 30,
+        linetype = "dashed",
+        color = "green"
       ) +
       ggplot2::coord_cartesian(ylim = c(0, 100)) +
       ggplot2::labs(
@@ -411,23 +483,35 @@ server <- function(input, output, session) {
         y = "RSI"
       ) +
       ggplot2::theme_minimal()
-
+    
     plotly::ggplotly(p)
   })
-
+  
+  # MACD CHART
+  
   output$macd_chart <- plotly::renderPlotly({
+    
     shiny::req(input$show_macd)
-
+    
     data <- selected_data()
-
-    p <- ggplot2::ggplot(data, ggplot2::aes(x = Date)) +
+    
+    shiny::validate(
+      shiny::need(nrow(data) > 0, "No MACD data available.")
+    )
+    
+    p <- ggplot2::ggplot(
+      data,
+      ggplot2::aes(x = Date)
+    ) +
       ggplot2::geom_line(
         ggplot2::aes(y = MACD, color = "MACD"),
-        linewidth = 0.8, na.rm = TRUE
+        linewidth = 0.8,
+        na.rm = TRUE
       ) +
       ggplot2::geom_line(
-        ggplot2::aes(y = Signal, color = "Signal"),
-        linewidth = 0.8, na.rm = TRUE
+        ggplot2::aes(y = MACD_Signal, color = "Signal"),
+        linewidth = 0.8,
+        na.rm = TRUE
       ) +
       ggplot2::labs(
         title = "MACD Indicator",
@@ -436,23 +520,27 @@ server <- function(input, output, session) {
         color = "Legend"
       ) +
       ggplot2::theme_minimal()
-
+    
     plotly::ggplotly(p)
   })
-
+  
+  # TRADING SIGNAL TABLE
+  
   output$signal_table <- DT::renderDT({
+    
     selected_data() %>%
       dplyr::filter(Trading_Signal != "HOLD") %>%
       dplyr::select(
         Date, Symbol, Close, MA20, MA50, Trading_Signal
       ) %>%
       dplyr::arrange(dplyr::desc(Date))
-  }, options = list(pageLength = 10, scrollX = TRUE))
+    
+  }, options = list(
+    pageLength = 10,
+    scrollX = TRUE
+  ))
 }
 
-
-# ==========================================================
-# SECTION 10: RUN SHINY DASHBOARD
-# ==========================================================
+# SECTION 9: RUN DASHBOARD
 
 shiny::shinyApp(ui = ui, server = server)
